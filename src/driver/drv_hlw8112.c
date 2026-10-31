@@ -1002,9 +1002,12 @@ static void HLW8112_ScaleAndUpdate(HLW8112_Data_t* data) {
 
 
 void HLW8112_RunEverySecond(void) {
-	HLW8112_Data_t data;
+	HLW8112_Data_t data = {0};
 
-	HLW8112_ReadRegister24(HLW8112_REG_RMSU, &data.v_rms);
+	if (HLW8112_ReadRegister24(HLW8112_REG_RMSU, &data.v_rms) < 0) {
+		// SPI transfer failed: don't publish uninitialised/garbage values
+		return;
+	}
 	HLW8112_ReadRegister16(HLW8112_REG_UFREQ, &data.freq);
 
 	HLW8112_ReadRegister24(HLW8112_REG_RMSIA, &data.ia_rms);

@@ -26,7 +26,7 @@ uint32_t mode = SPI_MASTER;
 #define bk_spi_master_deinit() bk_spi_master_dma_deinit(1)
 #define bk_spi_slave_init bk_spi_slave_dma_init
 #define bk_spi_slave_deinit bk_spi_slave_dma_deinit
-#define bk_spi_master_xfer(x) bk_spi_master_dma_xfer(x, 0)
+#define bk_spi_master_xfer(x) bk_spi_master_dma_xfer(x, 100)
 #define bk_spi_slave_xfer bk_spi_slave_dma_xfer
 #endif
 int SPI_DriverInit(void) {
