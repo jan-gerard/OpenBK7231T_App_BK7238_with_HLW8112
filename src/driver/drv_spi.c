@@ -19,6 +19,32 @@ uint32_t mode = SPI_MASTER;
 #endif
 #include "../logging/logging.h"
 
+#if PLATFORM_BEKEN_NEW && (PLATFORM_BK7231N || PLATFORM_BK7238 || PLATFORM_BK7252N)
+// Remember master settings so the DMA master can be re-initialised.
+static UINT32 g_spi_dma_rate = 0;
+static UINT32 g_spi_dma_mode = 0;
+static int g_spi_dma_recoveries = 0;
+
+// bk_spi_master_dma_xfer() leaves an element in its ready list when the wait
+// times out (-7). That element is never freed and blocks every following
+// transfer until the 10-element queue is exhausted (-6), so reads silently
+// stop until a reboot. On any failure: force-deinit (flushes the queue),
+// re-init with the saved settings and retry once.
+static int OBK_SPI_MasterDmaXfer(struct spi_message *msg) {
+	int r = bk_spi_master_dma_xfer(msg, 100);
+	if (r >= 0 || g_spi_dma_rate == 0)
+		return r;
+	g_spi_dma_recoveries++;
+	ADDLOG_WARN(LOG_FEATURE_DRV, "SPI DMA xfer failed (%i), re-init #%i", r, g_spi_dma_recoveries);
+	bk_spi_master_dma_deinit(1);
+	if (bk_spi_master_dma_init(g_spi_dma_rate, g_spi_dma_mode) != 0) {
+		ADDLOG_ERROR(LOG_FEATURE_DRV, "SPI DMA re-init failed");
+		return r;
+	}
+	return bk_spi_master_dma_xfer(msg, 100);
+}
+#endif
+
 
 #if PLATFORM_BEKEN_NEW && (PLATFORM_BK7231N || PLATFORM_BK7238 || PLATFORM_BK7252N)
 #include "spi_bk7231n.h"
@@ -26,7 +52,7 @@ uint32_t mode = SPI_MASTER;
 #define bk_spi_master_deinit() bk_spi_master_dma_deinit(1)
 #define bk_spi_slave_init bk_spi_slave_dma_init
 #define bk_spi_slave_deinit bk_spi_slave_dma_deinit
-#define bk_spi_master_xfer(x) bk_spi_master_dma_xfer(x, 100)
+#define bk_spi_master_xfer(x) OBK_SPI_MasterDmaXfer(x)
 #define bk_spi_slave_xfer bk_spi_slave_dma_xfer
 #endif
 int SPI_DriverInit(void) {
@@ -112,8 +138,13 @@ int OBK_SPI_Init(const spi_config_t *config) {
 	return err;
 #elif PLATFORM_BEKEN_NEW
 	mode = config->role == SPI_ROLE_MASTER ? SPI_MASTER : SPI_SLAVE;
-	if(mode == SPI_MASTER)
+	if(mode == SPI_MASTER) {
+#if (PLATFORM_BK7231N || PLATFORM_BK7238 || PLATFORM_BK7252N)
+		g_spi_dma_rate = config->baud_rate;
+		g_spi_dma_mode = ((config->polarity == SPI_POLARITY_LOW ? 0 : SPI_CPOL) | (config->phase == SPI_PHASE_1ST_EDGE ? 0 : SPI_CPHA));
+#endif
 		return bk_spi_master_init(config->baud_rate, ((config->polarity == SPI_POLARITY_LOW ? 0 : SPI_CPOL) | (config->phase == SPI_PHASE_1ST_EDGE ? 0 : SPI_CPHA)));
+	}
 	else
 		return bk_spi_slave_init(config->baud_rate, ((config->polarity == SPI_POLARITY_LOW ? 0 : SPI_CPOL) | (config->phase == SPI_PHASE_1ST_EDGE ? 0 : SPI_CPHA)));
 #else
