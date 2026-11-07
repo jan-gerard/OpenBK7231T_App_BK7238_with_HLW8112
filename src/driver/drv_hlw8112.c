@@ -480,7 +480,34 @@ static commandResult_t HLW8112_a(const void *context, const char *cmd, const cha
 }
 #endif
 
+// MQTT publish interval (seconds); see HLW8112_SetPublishInterval
+static int hlw8112_publishInterval = 30;
+static int hlw8112_tick = 0;
+static int64_t hlw8112_sum_pa = 0, hlw8112_sum_pb = 0, hlw8112_sum_ap = 0;
+static int64_t hlw8112_sum_ia = 0, hlw8112_sum_ib = 0;
+
+commandResult_t HLW8112_SetPublishInterval(const void* context, const char* cmd, const char* args, int cmdFlags) {
+	Tokenizer_TokenizeString(args, 0);
+	if (Tokenizer_CheckArgsCountAndPrintWarning(cmd, 1)) {
+		return CMD_RES_NOT_ENOUGH_ARGUMENTS;
+	}
+	int v = Tokenizer_GetArgInteger(0);
+	if (v < 1) v = 1;
+	if (v > 3600) v = 3600;
+	hlw8112_publishInterval = v;
+	hlw8112_tick = 0;
+	hlw8112_sum_pa = hlw8112_sum_pb = hlw8112_sum_ap = 0;
+	hlw8112_sum_ia = hlw8112_sum_ib = 0;
+	ADDLOG_INFO(LOG_FEATURE_ENERGYMETER, "HLW8112 publish interval set to %i s", v);
+	return CMD_RES_OK;
+}
+
 void HLW8112_addCommads(void){
+	//cmddetail:{"name":"HLW8112_SetPublishInterval","args":"[Seconds]",
+	//cmddetail:"descr":"Publish HLW8112 values over MQTT only every N seconds (1..3600, default 30; 1 = on every change). Power and current are averaged over the interval; energy keeps accumulating every second.",
+	//cmddetail:"fn":"HLW8112_SetPublishInterval","file":"driver/drv_hlw8112.c","requires":"",
+	//cmddetail:"examples":"HLW8112_SetPublishInterval 30"}
+	CMD_RegisterCommand("HLW8112_SetPublishInterval", HLW8112_SetPublishInterval, NULL);
 	//cmddetail:{"name":"HLW8112_SetClock","args":"TODO",
 	//cmddetail:"descr":"",
 	//cmddetail:"fn":"HLW8112_SetClock","file":"driver/drv_hlw8112.c","requires":"",
@@ -984,18 +1011,47 @@ static void HLW8112_ScaleAndUpdate(HLW8112_Data_t* data) {
 
 	// update
 	
-	CHANNEL_Set(HLW8112_Channel_Voltage, last_update_data.v_rms / 10.0, 0);
-	CHANNEL_Set(HLW8112_Channel_Frequency,last_update_data.freq , 0);
-	CHANNEL_Set(HLW8112_Channel_PowerFactor, last_update_data.pf, 0);
-	CHANNEL_Set(HLW8112_Channel_current_B, last_update_data.ib_rms, 0);
-	CHANNEL_Set(HLW8112_Channel_current_A,last_update_data.ia_rms , 0);
-	CHANNEL_Set(HLW8112_Channel_power_B, last_update_data.pb / 10.0, 0);
-	CHANNEL_Set(HLW8112_Channel_power_A, last_update_data.pa / 10.0, 0);
-	CHANNEL_Set(HLW8112_Channel_apparent_power_A, last_update_data.ap / 10.0, 0);
-	CHANNEL_Set(HLW8112_Channel_export_B, last_update_data.eb->Export * 1000, 0);
-	CHANNEL_Set(HLW8112_Channel_export_A, last_update_data.ea->Export * 1000, 0);
-	CHANNEL_Set(HLW8112_Channel_import_B, last_update_data.eb->Import * 1000, 0);
-	CHANNEL_Set(HLW8112_Channel_import_A, last_update_data.ea->Import * 1000, 0);
+	// Registers are still read and energy is still accumulated every second;
+	// only MQTT publishing is reduced to once per hlw8112_publishInterval seconds.
+	// In between, channels are updated with SKIP_MQTT so the web UI stays live.
+	// Power values published at the interval are averages over that interval.
+	hlw8112_sum_pa += last_update_data.pa;
+	hlw8112_sum_pb += last_update_data.pb;
+	hlw8112_sum_ap += last_update_data.ap;
+	hlw8112_sum_ia += last_update_data.ia_rms;
+	hlw8112_sum_ib += last_update_data.ib_rms;
+	hlw8112_tick++;
+
+	int flags;
+	int32_t pa = last_update_data.pa, pb = last_update_data.pb, ap = last_update_data.ap;
+	int32_t ia = last_update_data.ia_rms, ib = last_update_data.ib_rms;
+	if (hlw8112_tick >= hlw8112_publishInterval) {
+		pa = (int32_t)(hlw8112_sum_pa / hlw8112_tick);
+		pb = (int32_t)(hlw8112_sum_pb / hlw8112_tick);
+		ap = (int32_t)(hlw8112_sum_ap / hlw8112_tick);
+		ia = (int32_t)(hlw8112_sum_ia / hlw8112_tick);
+		ib = (int32_t)(hlw8112_sum_ib / hlw8112_tick);
+		hlw8112_sum_pa = hlw8112_sum_pb = hlw8112_sum_ap = 0;
+		hlw8112_sum_ia = hlw8112_sum_ib = 0;
+		hlw8112_tick = 0;
+		// interval 1 keeps the original behaviour (publish on change only)
+		flags = (hlw8112_publishInterval > 1) ? CHANNEL_SET_FLAG_FORCE : 0;
+	} else {
+		flags = CHANNEL_SET_FLAG_SKIP_MQTT;
+	}
+
+	CHANNEL_Set(HLW8112_Channel_Voltage, last_update_data.v_rms / 10.0, flags);
+	CHANNEL_Set(HLW8112_Channel_Frequency,last_update_data.freq , flags);
+	CHANNEL_Set(HLW8112_Channel_PowerFactor, last_update_data.pf, flags);
+	CHANNEL_Set(HLW8112_Channel_current_B, ib, flags);
+	CHANNEL_Set(HLW8112_Channel_current_A, ia, flags);
+	CHANNEL_Set(HLW8112_Channel_power_B, pb / 10.0, flags);
+	CHANNEL_Set(HLW8112_Channel_power_A, pa / 10.0, flags);
+	CHANNEL_Set(HLW8112_Channel_apparent_power_A, ap / 10.0, flags);
+	CHANNEL_Set(HLW8112_Channel_export_B, last_update_data.eb->Export * 1000, flags);
+	CHANNEL_Set(HLW8112_Channel_export_A, last_update_data.ea->Export * 1000, flags);
+	CHANNEL_Set(HLW8112_Channel_import_B, last_update_data.eb->Import * 1000, flags);
+	CHANNEL_Set(HLW8112_Channel_import_A, last_update_data.ea->Import * 1000, flags);
 }
 
 #pragma endregion
