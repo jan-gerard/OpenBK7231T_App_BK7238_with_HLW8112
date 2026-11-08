@@ -268,6 +268,8 @@ jobs:
           - platform: OpenBK7238
             variant: berry
           - platform: OpenBK7238
+            variant: hlw8112
+          - platform: OpenBK7238
             variant: irRemoteESP
           - platform: OpenBK7238
             variant: battery
